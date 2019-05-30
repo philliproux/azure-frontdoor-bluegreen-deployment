@@ -1,0 +1,111 @@
+trigger:
+- master
+
+variables:
+  buildConfiguration: 'Release'
+
+stages:
+- stage: Build
+  displayName: 'Build Solution'
+  jobs:
+  - job: Build
+    displayName: 'Build Solution'
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - task: DotNetCoreCLI@2
+      displayName: 'Build All .NET Core Projects'
+      inputs:
+        projects: '**/*.csproj'
+        arguments: '-c Release'
+
+    - task: DotNetCoreCLI@2
+      displayName: 'Publish WebApp'
+      inputs:
+        command: publish
+        arguments: '-c Release --output WebApp'
+        zipAfterPublish: false
+
+    - task: ArchiveFiles@2
+      displayName: 'Archive WebApp'
+      inputs:
+        rootFolderOrFile: WebApp/s
+        includeRootFolder: false
+        archiveFile: WebApp\bin\Release\netcoreapp2.2\WebApp.zip
+      
+    - task: PublishBuildArtifacts@1
+      displayName: 'Publish Artifact: WebApp'
+      inputs:
+        PathtoPublish: WebApp\bin\Release\netcoreapp2.2\WebApp.zip
+        ArtifactName: WebApp
+        
+    - task: PublishPipelineArtifact@0
+      displayName: 'Publish Artifact: ToggleBackendColor'
+      inputs:
+        artifactName: 'ToggleBackendsScript'
+        targetPath: 'ToggleFrontdoorBackends.ps1'
+
+
+- stage: Deploy
+  displayName: 'Deploy Solution'
+  variables:
+    frontDoorResourceGroup: 'frontdoor-bluegreen-rg'
+    frontDoorName: 'frontdoor-blue-green'
+    frontDoorUrl: 'frontdoor-blue-green-demo-app.philliproux.com'
+    frontDoorBackendPoolName: 'backendpool'
+    appServiceNameBlue: 'frontdoor-web-blue'
+    appServiceNameGreen: 'frontdoor-web-green'
+    webAppBlueUrl: 'frontdoor-web-blue.azurewebsites.net'
+    webAppGreenUrl: 'frontdoor-web-green.azurewebsites.net'
+    targetAppServiceName: '' # Set in inline script
+    targetWebAppUrl: '' # Set in toggle script
+  jobs:
+  - job: Deploy
+    steps:      
+    - task: DownloadBuildArtifacts@0
+      displayName: "Download WebApp build artifact"
+      inputs:
+        buildType: 'current'
+        downloadType: 'single'
+        artifactName: 'WebApp'
+        downloadPath: '$(System.ArtifactsDirectory)'
+
+    - task: DownloadBuildArtifacts@0
+      displayName: "Download ToggleBackendsScript build artifact"
+      inputs:
+        buildType: 'current'
+        downloadType: 'single'
+        artifactName: 'ToggleBackendsScript'
+        downloadPath: '$(System.ArtifactsDirectory)'
+
+    - powershell: |
+        $response = Invoke-WebRequest "$(frontDoorUrl)" -UseBasicParsing -Method Head
+        $targetAppServiceName= If ($response.Headers["set-cookie"] -like "*Domain=$(webAppGreenUrl)*") {"$(appServiceNameBlue)"} Else {"$(appServiceNameGreen)"}
+        Write-Host "##vso[task.setvariable variable=targetAppServiceName]$targetAppServiceName"
+        Write-Host "Target App Service Name for deployment: $targetAppServiceName"
+      displayName: "Detect target environment color for deployment"
+
+    - task: AzureRmWebAppDeployment@4
+      displayName: "Azure App Service Deploy to Target App Service Color"
+      inputs:
+        ConnectionType: 'AzureRM'
+        azureSubscription: 'Azure Service Principal'
+        appType: 'webApp'
+        WebAppName: '$(targetAppServiceName)'
+        packageForLinux: '$(System.ArtifactsDirectory)/**/*.zip'
+
+    - task: AzureKeyVault@1
+      displayName: "Get Service Principal Credentials From Keyvault for Azure CLI login"
+      inputs:
+        azureSubscription: 'ManualDevOpsSp'
+        KeyVaultName: 'devops-serviceprincipal'
+        SecretsFilter: '*'
+
+    - task: AzurePowerShell@4
+      displayName: 'Switch environments Blue/Green using Frontdoor Azure CLI'
+      inputs:
+        azureSubscription: 'Azure Service Principal'
+        ScriptType: 'FilePath'
+        ScriptPath: 'ToggleFrontdoorBackends.ps1'
+        ScriptArguments: '-frontDoorResourceGroup $(frontDoorResourceGroup) -frontDoorName $(frontDoorName) -frontDoorBackendPoolName $(frontDoorBackendPoolName) -frontDoorUrl $(frontDoorUrl) -webAppBlueUrl $(webAppBlueUrl) -webAppGreenUrl $(webAppGreenUrl) -loginWithServicePrincipal $true -spUsername $(sp-username) -spPassword $(sp-password) -tenant $(tenant)'
+        azurePowerShellVersion: 'LatestVersion'

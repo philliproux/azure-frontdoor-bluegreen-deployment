@@ -1,0 +1,9 @@
+﻿@page
+@model IndexModel
+@{
+    ViewData["Title"] = "Home page";
+}
+
+<h1 class="display-4" style="color:@Environment.GetEnvironmentVariable("DEPLOYMENT_HOST_COLOR")">Welcome</h1>
+
+<div>Environment: @Environment.GetEnvironmentVariable("DEPLOYMENT_HOST_COLOR")</div>
